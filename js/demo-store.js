@@ -40,15 +40,16 @@ var DemoStore = (function () {
   }
 
   return {
-    read: function (t) { return (db[t] || []).map(function (r) { return Object.assign({}, r); }); },
+    read: function (t) { db = load(); return (db[t] || []).map(function (r) { return Object.assign({}, r); }); },
     write: function (t, rows) { db[t] = rows.map(function (r) { var o = {}; TABLES[t].forEach(function (c) { o[c] = r[c] === undefined || r[c] === null ? '' : r[c]; }); return o; }); save(); },
-    append: function (t, row) { (db[t] = db[t] || []).push(row); if (t === 'Logs' && db[t].length > 1000) db[t] = db[t].slice(-1000); save(); },
-    cacheGet: function (k) { var c = (db._cache || {})[k]; return c && c.exp > Date.now() ? c.v : null; },
-    cachePut: function (k, v, sec) { (db._cache = db._cache || {})[k] = { v: v, exp: Date.now() + sec * 1000 }; save(); },
+    append: function (t, row) { db = load(); (db[t] = db[t] || []).push(row); if (t === 'Logs' && db[t].length > 1000) db[t] = db[t].slice(-1000); save(); },
+    cacheGet: function (k) { db = load(); var c = (db._cache || {})[k]; return c && c.exp > Date.now() ? c.v : null; },
+    cachePut: function (k, v, sec) { db = load(); (db._cache = db._cache || {})[k] = { v: v, exp: Date.now() + sec * 1000 }; save(); },
     cacheRemove: function (k) { if (db._cache) { delete db._cache[k]; save(); } },
     hash: sha256,
     uuid: function () { return (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'x' + Math.random().toString(36).slice(2) + Date.now().toString(36); },
     lock: function (fn) { return fn(); },
+    httpGet: function () { return { code: 200, body: 'ডেমো মোড: আসলে পাঠানো হয়নি' }; },
     reset: function () { localStorage.removeItem(KEY); db = {}; }
   };
 })();

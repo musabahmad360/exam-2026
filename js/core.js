@@ -7,12 +7,13 @@ var SUBJECTS_QURAN = ['আল কুরআন', 'তাজবীদ', 'সূর
 var SUBJECTS_KAIDA = ['কায়দা', 'সূরা মুখস্ত', 'মাসনূন দোয়া', 'আকাঈদ', 'সালাত', 'ফিকহ', 'আদব ও আমাল'];
 
 var TABLES = {
-  Students: ['reg', 'name', 'father', 'branch', 'group', 'year', 'roll'],
+  Students: ['reg', 'name', 'father', 'branch', 'group', 'year', 'roll', 'phone'],
   Users: ['username', 'name', 'role', 'salt', 'hash', 'groups', 'active', 'phone'],
   Marks: ['reg', 'subject', 'value', 'by', 'at'],
   Status: ['gid', 'state', 'by', 'at'],
   Settings: ['key', 'value'],
-  Logs: ['at', 'user', 'action', 'detail']
+  Logs: ['at', 'user', 'action', 'detail'],
+  Messages: ['at', 'reg', 'channel', 'status', 'by', 'detail']
 };
 
 var DEFAULT_SETTINGS = {
@@ -22,6 +23,10 @@ var DEFAULT_SETTINGS = {
   fullMark: 100,
   passMark: 33,
   entryOpen: true,
+  published: false,
+  smsUrl: '',
+  smsTemplate: '{প্রতিষ্ঠান}\n{নাম} ({রেজি})\n{পরীক্ষা}: মোট {মোট}, গ্রেড {গ্রেড}, মেধা {মেধা}\nমার্কশিট: {লিংক}',
+  waTemplate: 'আসসালামু আলাইকুম।\n*{প্রতিষ্ঠান}*\n{পরীক্ষা}-এর ফলাফল\n\nনাম: *{নাম}*\nপিতা: {পিতা}\nরেজি: {রেজি}\nগ্রুপ: {গ্রুপ}\n\n{বিষয়ভিত্তিক}\n\nমোট নম্বর: *{মোট}*\nগড়: {গড়}\nগ্রেড: *{গ্রেড}*\nমেধাস্থান: {মেধা}\nফলাফল: {ফলাফল}\n\nপূর্ণ মার্কশিট দেখুন ও প্রিন্ট করুন:\n{লিংক}\n\nজাযাকাল্লাহু খাইরান।',
   grades: [
     { min: 80, name: 'মুমতায' },
     { min: 65, name: 'জায়্যিদ জিদ্দান' },
@@ -43,6 +48,28 @@ function createCore(store) {
   function nowIso() { return new Date().toISOString(); }
   function toNum(v) { var n = parseFloat(v); return isNaN(n) ? null : n; }
   function parseJson(v, d) { try { return v ? JSON.parse(v) : d; } catch (e) { return d; } }
+  function W(t, rows) { store.write(t, rows); if (t !== 'Logs' && t !== 'Messages') bump(); }
+  function bump() { try { store.cachePut('rev', String(Date.now()), 21600); } catch (e) { } }
+  function normPhone(p) {
+    p = String(p || '').replace(/[০-৯]/g, function (d) { return '০১২৩৪৫৬৭৮৯'.indexOf(d); }).replace(/\D/g, '');
+    if (p.indexOf('880') === 0) p = p.slice(2);
+    if (p.indexOf('88') === 0 && p.length === 13) p = p.slice(2);
+    if (p.length === 10 && p.charAt(0) === '1') p = '0' + p;
+    return p;
+  }
+  function smsOk(res) {
+    if (!(res.code >= 200 && res.code < 300)) return false;
+    var b = str(res.body), j = null;
+    try { j = JSON.parse(b); } catch (e) { }
+    if (j && typeof j === 'object') {
+      if (j.error !== undefined) return Number(j.error) === 0 || j.error === false;
+      if (j.response_code !== undefined) return [200, 201, 202].indexOf(Number(j.response_code)) >= 0;
+      if (j.status !== undefined) return /success|ok|sent|true|200|1000/i.test(String(j.status));
+      if (j.success !== undefined) return j.success === true || String(j.success) === '1';
+    }
+    return !/error|invalid|fail|insufficient|wrong|denied|unauthori/i.test(b);
+  }
+  function validPhone(p) { return /^01[3-9]\d{8}$/.test(p); }
 
   // ---------- settings ----------
   function getSettings() {
@@ -52,10 +79,35 @@ function createCore(store) {
       var v = str(r.value);
       if (k === 'grades') s.grades = parseJson(v, s.grades);
       else if (k === 'fullMark' || k === 'passMark') s[k] = toNum(v) === null ? s[k] : toNum(v);
-      else if (k === 'entryOpen') s.entryOpen = v === 'true' || v === 'TRUE';
+      else if (k === 'entryOpen' || k === 'published') s[k] = v === 'true' || v === 'TRUE';
       else s[k] = v;
     });
     return s;
+  }
+
+  function publicSettings(s, u) {
+    var o = JSON.parse(JSON.stringify(s));
+    delete o.linkSecret;
+    if (!u || u.role !== 'admin') delete o.smsUrl;
+    return o;
+  }
+  function linkSecret() {
+    var rows = store.read('Settings');
+    var r = rows.filter(function (x) { return str(x.key) === 'linkSecret'; })[0];
+    if (r && str(r.value)) return str(r.value);
+    var sec = store.uuid() + store.uuid();
+    store.append('Settings', { key: 'linkSecret', value: sec });
+    return sec;
+  }
+  function linkCode(secret, reg) { return store.hash(secret + '|' + reg).slice(0, 10); }
+  function readMessages() {
+    var m = {};
+    store.read('Messages').forEach(function (r) {
+      var reg = str(r.reg); if (!reg) return;
+      if (!m[reg]) m[reg] = {};
+      m[reg][str(r.channel)] = { status: str(r.status), at: str(r.at), detail: str(r.detail) };
+    });
+    return m;
   }
 
   // ---------- users / auth ----------
@@ -70,7 +122,7 @@ function createCore(store) {
     }).filter(function (u) { return u.username; });
   }
   function writeUsers(users) {
-    store.write('Users', users.map(function (u) {
+    W('Users', users.map(function (u) {
       return { username: u.username, name: u.name, role: u.role, salt: u.salt, hash: u.hash,
         groups: JSON.stringify(u.groups || []), active: u.active ? 'true' : 'false', phone: u.phone || '' };
     }));
@@ -99,7 +151,7 @@ function createCore(store) {
   function readStudents() {
     return store.read('Students').map(function (s) {
       return { reg: str(s.reg), name: str(s.name), father: str(s.father), branch: str(s.branch),
-        group: str(s.group), year: str(s.year), roll: toNum(s.roll) || 0 };
+        group: str(s.group), year: str(s.year), roll: toNum(s.roll) || 0, phone: str(s.phone) };
     }).filter(function (s) { return s.reg; });
   }
   function groupList(students) {
@@ -136,7 +188,7 @@ function createCore(store) {
         if (c.value !== '') rows.push({ reg: reg, subject: sub, value: c.value, by: c.by, at: c.at });
       });
     });
-    store.write('Marks', rows);
+    W('Marks', rows);
   }
   function readStatus() {
     var s = {};
@@ -146,7 +198,22 @@ function createCore(store) {
   function setStatus(gid, state, by) {
     var all = readStatus();
     all[gid] = { state: state, by: by, at: nowIso() };
-    store.write('Status', Object.keys(all).map(function (g) { return { gid: g, state: all[g].state, by: all[g].by, at: all[g].at }; }));
+    W('Status', Object.keys(all).map(function (g) { return { gid: g, state: all[g].state, by: all[g].by, at: all[g].at }; }));
+  }
+  function ownersOf(students, marks, users) {
+    var role = {}, nm = {};
+    users.forEach(function (x) { role[x.username] = x.role; nm[x.username] = x.name; });
+    var out = {};
+    students.forEach(function (s) {
+      var m = marks[s.reg] || {}, first = null;
+      Object.keys(m).forEach(function (sub) {
+        var c = m[sub];
+        if (c.value === '' || !c.by || role[c.by] === 'admin') return;
+        if (!first || c.at < first.at) first = { user: c.by, name: nm[c.by] || c.by, at: c.at };
+      });
+      if (first) out[s.reg] = first;
+    });
+    return out;
   }
   function progressOf(g, marks) {
     var total = g.students.length * g.subjects.length, filled = 0;
@@ -261,7 +328,7 @@ function createCore(store) {
       var settings = getSettings(), students = readStudents(), marks = readMarks(), status = readStatus(), users = readUsers();
       var groups = groupList(students).filter(function (g) { return canAccess(u, g.gid); })
         .map(function (g) { return groupSummary(g, marks, status, users); });
-      return { user: publicUser(u), settings: settings, groups: groups };
+      return { user: publicUser(u), settings: publicSettings(settings, u), groups: groups };
     },
 
     getGroup: function (req, u) {
@@ -271,7 +338,7 @@ function createCore(store) {
       var marks = readMarks(), status = readStatus(), users = readUsers();
       var out = {};
       g.students.forEach(function (s) { var m = marks[s.reg] || {}; out[s.reg] = {}; g.subjects.forEach(function (sub) { out[s.reg][sub] = m[sub] ? m[sub].value : ''; }); });
-      return { summary: groupSummary(g, marks, status, users), students: g.students, marks: out };
+      return { summary: groupSummary(g, marks, status, users), students: g.students, marks: out, owners: ownersOf(g.students, marks, users), me: u.username };
     },
 
     saveMarks: function (req, u) {
@@ -286,9 +353,11 @@ function createCore(store) {
       if (!g) fail('গ্রুপ পাওয়া যায়নি');
       var regs = {}; g.students.forEach(function (s) { regs[s.reg] = 1; });
       var subs = {}; g.subjects.forEach(function (s) { subs[s] = 1; });
-      var marks = readMarks(), at = nowIso(), n = 0;
+      var marks = readMarks(), at = nowIso(), n = 0, conflicts = {};
+      var owners = u.role === 'admin' ? {} : ownersOf(g.students, marks, readUsers());
       (req.entries || []).forEach(function (e) {
         if (!regs[e.reg] || !subs[e.subject]) return;
+        if (owners[e.reg] && owners[e.reg].user !== u.username) { conflicts[e.reg] = owners[e.reg].name; return; }
         var v = cleanValue(e.value, settings);
         if (!marks[e.reg]) marks[e.reg] = {};
         var old = marks[e.reg][e.subject] ? marks[e.reg][e.subject].value : '';
@@ -297,7 +366,7 @@ function createCore(store) {
         n++;
       });
       if (n) { writeMarks(marks); log(u.username, 'নম্বর সংরক্ষণ', g.group + ' (' + g.branch + ') — ' + n + 'টি ঘর'); }
-      return { saved: n, progress: progressOf(g, marks) };
+      return { saved: n, progress: progressOf(g, marks), conflicts: conflicts, owners: ownersOf(g.students, marks, readUsers()) };
     },
 
     submitGroup: function (req, u) {
@@ -322,7 +391,7 @@ function createCore(store) {
       var settings = getSettings(), marks = readMarks();
       var gs = groupList(readStudents()).filter(function (g) { return (req.gid === '*' || g.gid === req.gid) && canAccess(u, g.gid); });
       if (!gs.length) fail('গ্রুপ পাওয়া যায়নি');
-      return { settings: settings, groups: gs.map(function (g) { return computeGroup(g, marks, settings); }) };
+      return { settings: publicSettings(settings, u), groups: gs.map(function (g) { return computeGroup(g, marks, settings); }) };
     },
 
     dashboard: function (req, u) {
@@ -409,7 +478,8 @@ function createCore(store) {
       }
       ex.reg = reg; ex.name = str(d.name).trim(); ex.father = str(d.father).trim();
       ex.branch = str(d.branch).trim(); ex.group = str(d.group).trim(); ex.year = str(d.year).trim();
-      store.write('Students', list);
+      var ph = normPhone(d.phone); if (ph && !validPhone(ph)) fail('মোবাইল নম্বর সঠিক নয় (01XXXXXXXXX)'); ex.phone = ph;
+      W('Students', list);
       if (orig && orig !== reg) {
         var m = readMarks(); if (m[orig]) { m[reg] = m[orig]; delete m[orig]; writeMarks(m); }
       }
@@ -419,11 +489,77 @@ function createCore(store) {
     deleteStudent: function (req, u) {
       requireAdmin(u);
       var reg = str(req.reg);
-      store.write('Students', readStudents().filter(function (s) { return s.reg !== reg; }));
+      W('Students', readStudents().filter(function (s) { return s.reg !== reg; }));
       var m = readMarks(); if (m[reg]) { delete m[reg]; writeMarks(m); }
       log(u.username, 'শিক্ষার্থী মুছে ফেলা', reg);
       return {};
     },
+
+    // ----- guardians / messages -----
+    savePhones: function (req, u) {
+      requireAdmin(u);
+      var list = readStudents(), map = {}, bad = [], n = 0;
+      list.forEach(function (s) { map[s.reg] = s; });
+      (req.entries || []).forEach(function (e) {
+        var s = map[str(e.reg).trim()]; if (!s) return;
+        var p = normPhone(e.phone);
+        if (p && !validPhone(p)) { bad.push(s.reg); return; }
+        if (s.phone !== p) { s.phone = p; n++; }
+      });
+      if (n) { W('Students', list); log(u.username, 'অভিভাবকের মোবাইল নম্বর', bn(n) + 'টি'); }
+      return { saved: n, bad: bad };
+    },
+    messageData: function (req, u) {
+      requireAdmin(u);
+      var settings = getSettings(), marks = readMarks(), sec = linkSecret(), msgs = readMessages();
+      var gs = groupList(readStudents()).filter(function (g) { return req.gid === '*' || g.gid === req.gid; });
+      return { settings: publicSettings(settings, u), groups: gs.map(function (g) {
+        var R = computeGroup(g, marks, settings), byReg = {};
+        g.students.forEach(function (s) { byReg[s.reg] = s; });
+        R.rows.forEach(function (r) { r.phone = byReg[r.reg].phone; r.code = linkCode(sec, r.reg); r.sent = msgs[r.reg] || {}; });
+        return R;
+      }) };
+    },
+    logMessage: function (req, u) {
+      requireAdmin(u);
+      (req.items || []).forEach(function (it) {
+        store.append('Messages', { at: nowIso(), reg: str(it.reg), channel: str(it.channel), status: str(it.status || 'sent'), by: u.username, detail: str(it.detail).slice(0, 200) });
+      });
+      return {};
+    },
+    sendSms: function (req, u) {
+      requireAdmin(u);
+      var settings = getSettings();
+      if (!settings.smsUrl || settings.smsUrl.indexOf('{number}') < 0 && settings.smsUrl.indexOf('{number11}') < 0 || settings.smsUrl.indexOf('{message}') < 0)
+        fail('সেটিংসে SMS API লিংক ঠিকমতো দেওয়া হয়নি ({number} ও {message} থাকতে হবে)');
+      var out = [];
+      (req.items || []).slice(0, 30).forEach(function (it) {
+        var p = normPhone(it.phone), res;
+        if (!validPhone(p)) { out.push({ reg: it.reg, ok: false, detail: 'নম্বর সঠিক নয়' }); return; }
+        var url = settings.smsUrl.split('{number11}').join(encodeURIComponent(p)).split('{number}').join(encodeURIComponent('88' + p))
+          .split('{message}').join(encodeURIComponent(str(it.message)));
+        try { res = store.httpGet(url); } catch (e) { res = { code: 0, body: String(e && e.message || e) }; }
+        var body = str(res.body).slice(0, 160);
+        var ok = smsOk(res);
+        if (!it.test) store.append('Messages', { at: nowIso(), reg: str(it.reg), channel: 'sms', status: ok ? 'sent' : 'failed', by: u.username, detail: body });
+        out.push({ reg: it.reg, ok: ok, detail: body });
+      });
+      log(u.username, 'SMS পাঠানো', bn(out.filter(function (x) { return x.ok; }).length) + '/' + bn(out.length));
+      return { results: out };
+    },
+    publicMarksheet: function (req) {
+      var settings = getSettings();
+      if (!settings.published) fail('ফলাফল এখনো প্রকাশিত হয়নি। প্রকাশের পর আবার দেখুন।');
+      var reg = str(req.reg);
+      if (!reg || linkCode(linkSecret(), reg) !== str(req.code)) fail('লিংকটি সঠিক নয়');
+      var g = groupList(readStudents()).filter(function (x) { return x.students.some(function (s) { return s.reg === reg; }); })[0];
+      if (!g) fail('শিক্ষার্থী পাওয়া যায়নি');
+      var R = computeGroup(g, readMarks(), settings);
+      var row = R.rows.filter(function (r) { return r.reg === reg; })[0];
+      return { settings: { institution: settings.institution, address: settings.address, examTitle: settings.examTitle, fullMark: settings.fullMark, passMark: settings.passMark },
+        group: R.group, branch: R.branch, subjects: R.subjects, row: row, count: R.stats.count, passed: R.stats.passed };
+    },
+    rev: function () { return { rev: store.cacheGet('rev') || '0' }; },
 
     // ----- settings / logs / backup -----
     saveSettings: function (req, u) {
@@ -433,9 +569,10 @@ function createCore(store) {
         var v = s.hasOwnProperty(k) ? s[k] : cur[k];
         rows.push({ key: k, value: k === 'grades' ? JSON.stringify(v) : String(v) });
       });
-      store.write('Settings', rows);
-      log(u.username, 'সেটিংস পরিবর্তন', '');
-      return { settings: getSettings() };
+      store.read('Settings').forEach(function (r) { if (str(r.key) && !DEFAULT_SETTINGS.hasOwnProperty(str(r.key))) rows.push({ key: str(r.key), value: str(r.value) }); });
+      W('Settings', rows);
+      log(u.username, 'সেটিংস পরিবর্তন', s.hasOwnProperty('published') && s.published !== cur.published ? (s.published ? 'ফলাফল প্রকাশ' : 'ফলাফল প্রকাশ বন্ধ') : '');
+      return { settings: publicSettings(getSettings(), u) };
     },
     logs: function (req, u) {
       requireAdmin(u);
@@ -451,7 +588,7 @@ function createCore(store) {
       requireAdmin(u);
       var b = req.backup || {};
       if (!b.Students || !b.Users) fail('ব্যাকআপ ফাইল সঠিক নয়');
-      Object.keys(TABLES).forEach(function (t) { if (b[t]) store.write(t, b[t]); });
+      Object.keys(TABLES).forEach(function (t) { if (b[t]) W(t, b[t]); });
       log(u.username, 'ব্যাকআপ থেকে পুনরুদ্ধার', '');
       return {};
     }
@@ -469,16 +606,16 @@ function createCore(store) {
       writeUsers(users);
     }
     if (!readStudents().length && seed) {
-      store.write('Students', seed.map(function (r) {
+      W('Students', seed.map(function (r) {
         return { reg: r[0], name: r[1], father: r[2], branch: r[3], group: r[4], year: r[5], roll: r[6] };
       }));
     }
     if (!store.read('Settings').length) {
-      store.write('Settings', Object.keys(DEFAULT_SETTINGS).map(function (k) {
+      W('Settings', Object.keys(DEFAULT_SETTINGS).map(function (k) {
         return { key: k, value: k === 'grades' ? JSON.stringify(DEFAULT_SETTINGS[k]) : String(DEFAULT_SETTINGS[k]) };
       }));
     }
-    ['Marks', 'Status', 'Logs'].forEach(function (t) { store.write(t, store.read(t)); });
+    ['Marks', 'Status', 'Logs', 'Messages'].forEach(function (t) { store.write(t, store.read(t)); });
     return 'ok';
   }
 
@@ -487,8 +624,10 @@ function createCore(store) {
       req = req || {};
       var a = actions[req.action];
       if (!a) fail('অজানা অনুরোধ');
-      var open = { ping: 1, login: 1, logout: 1 };
-      var data = store.lock(function () { return a(req, open[req.action] ? null : auth(req)); });
+      var open = { ping: 1, login: 1, logout: 1, rev: 1, publicMarksheet: 1 };
+      var nolock = { rev: 1, ping: 1, sendSms: 1 };
+      var run = function () { return a(req, open[req.action] ? null : auth(req)); };
+      var data = nolock[req.action] ? run() : store.lock(run);
       return { ok: true, data: data };
     } catch (e) {
       var msg = (e && e.message) || String(e);
